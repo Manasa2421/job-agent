@@ -1,0 +1,14 @@
+# Secrets - never commit your API key
+.env
+
+# Your personal data (resume, applications, reminders) - keep private
+data/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Mac
+.DS_Store

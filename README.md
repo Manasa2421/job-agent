@@ -1,13 +1,14 @@
-# Job Search Agent
+# My AI Agent
 
-An AI agent (Python + Claude API) that helps with a job search:
+A personal AI assistant (Python + Claude API) with job-search superpowers.
 
-- Tracks applications, grouped by your interest areas
-- Reminders with due dates
-- Daily update every time it starts (overdue items, follow-ups, interviews, summary)
-- ATS score of your resume against a job description, plus suggested resume changes
-  (or tells you to keep it the same when it's already a strong match)
-- Helps prepare applications (cover letters, answers to questions)
+## Features
+- Chat about anything, like Claude or ChatGPT, in a browser app
+- Long-term memory: learns your skills, goals and preferences
+- Optional web search: find real job openings and research companies
+- ATS resume check against any job description, with honest rewrite suggestions
+- Application tracker grouped by interest area
+- Reminders and a daily update
 
 ## Setup (Mac)
 ```bash
@@ -18,15 +19,11 @@ cp .env.example .env     # then put your API key in .env
 ```
 
 ## Run
-```bash
-source venv/bin/activate
-python agent.py
-```
+- App: double-click `Start-Job-Agent.command` (or `streamlit run app.py`)
+- Terminal version: `python agent.py`
 
-## Commands
-- `/paste` paste a job description (finish with `/end`)
-- `/daily` today's update
-- `/help`, `/quit`
-
-## Adding features
-Create `tools/new_feature.py` with `TOOLS` and `FUNCTIONS`, then add it to `MODULES` in `tools/__init__.py`.
+## Project structure
+- `app.py` browser app, `agent.py` terminal version
+- `core.py` the agent brain (prompt + tool loop)
+- `tools/` one file per feature; add new features here and register them in `tools/__init__.py`
+- `data/` your private data (never committed)

@@ -45,11 +45,23 @@ def get_resume() -> str:
     return storage.RESUME_FILE.read_text(encoding="utf-8")
 
 
+def _word_pattern(word: str) -> str:
+    # Lets "analytic" match "analytics", "pipeline" match "pipelines", etc.
+    w = word.lower()
+    if w.isalpha() and len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]
+    return re.escape(w) + (r"(?:s|es)?" if w.isalpha() else "")
+
+
 def _has_keyword(text: str, keyword: str) -> bool:
     # A keyword can list alternatives with '|', e.g. "JavaScript|JS"
     for alt in keyword.split("|"):
-        alt = alt.strip().lower()
-        if alt and re.search(r"(?<![a-z0-9])" + re.escape(alt) + r"s?(?![a-z0-9])", text):
+        words = alt.strip().split()
+        if not words:
+            continue
+        # Words may be separated by spaces, hyphens or slashes: "schema evolution" = "schema-evolution"
+        pattern = r"[\s\-/]+".join(_word_pattern(w) for w in words)
+        if re.search(r"(?<![a-z0-9])" + pattern + r"(?![a-z0-9])", text):
             return True
     return False
 

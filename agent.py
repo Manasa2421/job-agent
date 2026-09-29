@@ -1,82 +1,60 @@
-"""Job Search Agent: tracks applications, reminders, daily updates and ATS checks."""
+"""Terminal version of the agent. For the app version, double-click Start-Job-Agent.command."""
 import os
-from datetime import date
+import select
+import sys
 
 import anthropic
-from dotenv import load_dotenv
 
-from tools import TOOLS, run_tool
+import core
+import storage
 from tools.daily import daily_update
 
-load_dotenv()
-
-MODEL = "claude-sonnet-5"
-
-SYSTEM_PROMPT = """You are a personal job-search assistant agent. Today's date is {today}.
-
-You help the user:
-- Track job applications, grouped by their interest areas (categories).
-- Manage reminders (follow-ups, interviews, deadlines). Convert relative dates to YYYY-MM-DD.
-- Give daily updates.
-- Check ATS match between their resume and a job description (JD), and advise on resume changes.
-- Prepare applications: tailored summaries, cover letters, answers to application questions.
-  You cannot submit applications on websites yourself; the user submits, then you track it.
-
-When the user shares a JD:
-1. Make sure a resume is loaded (if not, ask for the file path).
-2. Extract 10-25 keywords from the JD (skills, tools, certifications, qualifications),
-   split into required and preferred, and call ats_check.
-3. Report the ATS score and matched/missing keywords.
-4. If the score is 80% or higher and no required keyword is missing, clearly say:
-   "Your resume is a strong match for this JD - no changes needed, keep it the same."
-5. Otherwise, call get_resume and suggest specific changes: which keywords to add and where
-   (Skills section or a specific bullet), with rewritten bullet examples.
-   NEVER invent experience or skills. If a keyword is missing, ask whether the user
-   actually has that skill before suggesting they add it.
-6. Offer to add the job to the tracker under the right interest area, and store the ATS score.
-
-Be concise and practical. Use short lists. Always confirm before deleting anything."""
-
 HELP = """Commands:
-  /paste   paste multi-line text (like a job description); finish with a line: /end
+  /paste   paste long text (finish with a line: /end) - usually not needed, pasting works directly
   /daily   show today's update
+  /web     turn web search on/off
+  /clear   forget this conversation (long-term memories stay)
   /help    show this help
-  /quit    exit
-Or just talk: "add Google Data Analyst to my tracker", "remind me Friday to follow up", ..."""
+  /quit    exit"""
 
 
-class Agent:
-    def __init__(self):
-        if not os.getenv("ANTHROPIC_API_KEY"):
-            raise SystemExit("Missing ANTHROPIC_API_KEY. Copy .env.example to .env and add your key.")
-        self.client = anthropic.Anthropic()
-        self.system = SYSTEM_PROMPT.format(today=date.today().strftime("%A, %Y-%m-%d"))
-        self.messages = []
-
-    def chat(self, user_input: str) -> str:
-        self.messages.append({"role": "user", "content": user_input})
-        while True:
-            response = self.client.messages.create(
-                model=MODEL, max_tokens=4000, system=self.system,
-                tools=TOOLS, messages=self.messages,
-            )
-            self.messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason != "tool_use":
-                return "".join(b.text for b in response.content if b.type == "text")
-            results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    print(f"  [working: {block.name}]")
-                    results.append({"type": "tool_result", "tool_use_id": block.id,
-                                    "content": run_tool(block.name, block.input)})
-            self.messages.append({"role": "user", "content": results})
+_buffer = b""
 
 
-def read_multiline() -> str:
+def _read_line(block: bool = True):
+    """Reads one line straight from the keyboard input (no hidden buffering)."""
+    global _buffer
+    while b"\n" not in _buffer:
+        if not block and not select.select([0], [], [], 0.15)[0]:
+            return None
+        chunk = os.read(0, 65536)
+        if not chunk:
+            if _buffer:
+                line, _buffer = _buffer, b""
+                return line.decode("utf-8", "ignore")
+            raise EOFError
+        _buffer += chunk
+    line, _buffer = _buffer.split(b"\n", 1)
+    return line.decode("utf-8", "ignore")
+
+
+def read_input(prompt: str) -> str:
+    """Reads one message. If several lines are pasted at once, they become ONE message."""
+    print(prompt, end="", flush=True)
+    lines = [_read_line()]
+    while True:
+        more = _read_line(block=False)
+        if more is None:
+            break
+        lines.append(more)
+    return "\n".join(lines).strip()
+
+
+def read_paste() -> str:
     print("Paste your text. Type /end on a new line when finished.")
     lines = []
     while True:
-        line = input()
+        line = _read_line()
         if line.strip() == "/end":
             break
         lines.append(line)
@@ -84,33 +62,52 @@ def read_multiline() -> str:
 
 
 def main():
-    agent = Agent()
+    try:
+        client = core.get_client()
+    except core.MissingKeyError as e:
+        sys.exit(str(e))
+    history = storage.load_history()
+    web = False
     print("\n" + daily_update() + "\n")
-    print("Job Agent ready! Type /help for commands.\n")
+    print("Agent ready! Type /help for commands.\n")
+
     while True:
         try:
-            user_input = input("You: ").strip()
+            text = read_input("You: ")
         except (EOFError, KeyboardInterrupt):
             break
-        if not user_input:
+        if not text:
             continue
-        if user_input == "/quit":
+        cmd = text.lower()
+        if cmd == "/quit":
             break
-        if user_input == "/help":
-            print(HELP + "\n")
-            continue
-        if user_input == "/daily":
-            print("\n" + daily_update() + "\n")
-            continue
-        if user_input == "/paste":
-            text = read_multiline()
-            note = input("What should I do with it? (Enter = ATS check against my resume): ").strip()
-            user_input = f"{note or 'Here is a job description. Run an ATS check against my resume.'}\n\n{text}"
+        if cmd == "/help":
+            print(HELP + "\n"); continue
+        if cmd == "/daily":
+            print("\n" + daily_update() + "\n"); continue
+        if cmd == "/end":
+            print("(/end is only used to finish a /paste. Nothing to finish.)\n"); continue
+        if cmd == "/web":
+            web = not web
+            print(f"Web search is now {'ON' if web else 'OFF'}.\n"); continue
+        if cmd == "/clear":
+            history = []
+            storage.clear_history()
+            print("Conversation cleared.\n"); continue
+        if cmd == "/paste":
+            pasted = read_paste()
+            note = read_input("What should I do with it? (Enter = ATS check against my resume): ")
+            text = f"{note or 'Here is a job description. Run an ATS check against my resume.'}\n\n{pasted}"
+
         try:
-            print(f"\nAgent: {agent.chat(user_input)}\n")
+            reply = core.run_turn(client, history, text, web=web, plain_text=True,
+                                  on_tool=lambda name: print(f"  [working: {name}]"))
         except anthropic.APIError as e:
-            agent.messages.pop()  # drop the failed message so you can retry
             print(f"\n[API error] {e}\n")
+            continue
+        print(f"\nAgent: {reply}\n")
+        history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+        storage.save_history(history)
 
 
 if __name__ == "__main__":

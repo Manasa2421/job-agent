@@ -1,6 +1,6 @@
 """Manu Agent - your personal AI assistant app, in your browser.
 Start it by double-clicking Start-Job-Agent.command (or: streamlit run app.py)."""
-from datetime import time
+from datetime import date, datetime, time, timedelta
 
 import anthropic
 import pandas as pd
@@ -10,6 +10,7 @@ import core
 import storage
 from tools.applications import STATUSES, add_application, update_application
 from tools.daily import daily_update, due_now
+from tools.email_sync import connect_email, disconnect_email, email_configured
 from tools.memory import forget
 from tools.reminders import add_reminder, complete_reminder
 from tools.resume_ats import load_resume
@@ -39,6 +40,32 @@ if "history" not in st.session_state:
 
 client = st.session_state.client
 history = st.session_state.history
+AUTO_SYNC_HOURS = 6
+
+
+def run_email_sync(days: int = 7) -> str:
+    prompt = f"Sync my job applications from my email for the last {days} days (call sync_job_emails with days={days})."
+    return core.run_turn(client, [], prompt)
+
+
+def auto_sync_due() -> bool:
+    data = storage.load()
+    if not email_configured() or not data["settings"].get("auto_email_sync", True):
+        return False
+    last = data.get("last_email_sync")
+    if not last:
+        return True
+    return datetime.now() - datetime.strptime(last, "%Y-%m-%d %H:%M") > timedelta(hours=AUTO_SYNC_HOURS)
+
+
+if not st.session_state.get("auto_sync_checked"):
+    st.session_state.auto_sync_checked = True
+    if auto_sync_due():
+        try:
+            with st.spinner("📥 Checking your email for new job applications..."):
+                st.session_state.sync_summary = run_email_sync(7)
+        except anthropic.APIError as e:
+            st.session_state.sync_summary = f"Email check failed: {e}"
 
 
 def flash(msg: str):
@@ -80,7 +107,17 @@ with st.sidebar:
 
 
 # ---------- Chat ----------
+def show_sync_summary():
+    if st.session_state.get("sync_summary"):
+        with st.expander("📥 Latest email check", expanded=True):
+            st.markdown(st.session_state.sync_summary)
+            if st.button("Hide", key="hide_sync"):
+                st.session_state.sync_summary = ""
+                st.rerun()
+
+
 def chat_page():
+    show_sync_summary()
     due = due_now()
     if due:
         st.warning("**Due today:** " + " | ".join(due))
@@ -173,16 +210,57 @@ def jobs_page():
                 st.rerun()
 
 
-# ---------- Applications + Apply helper ----------
+# ---------- Applications ----------
 def applications_page():
     st.header("📋 Applications")
     show_flash()
+    show_sync_summary()
+    tab_week, tab_all, tab_apply, tab_email = st.tabs(
+        ["📆 This week", "📋 All applications", "✍️ Apply helper", "📧 Email sync"])
     apps = storage.load()["applications"]
-    if not apps:
-        st.info("No applications yet. Save one from Job updates, or tell Manu Agent in Chat: "
-                "\"I applied to [role] at [company], add it to my tracker\".")
-        return
+    with tab_week:
+        week_view(apps)
+    with tab_all:
+        all_view(apps)
+    with tab_apply:
+        apply_helper(apps)
+    with tab_email:
+        email_view()
 
+
+def week_view(apps):
+    today = date.today()
+    days = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    cutoff = days[0].isoformat()
+    week = sorted([a for a in apps if (a.get("date_applied") or "") >= cutoff],
+                  key=lambda a: a["date_applied"], reverse=True)
+    updated = [a for a in apps if a.get("last_updated", "") >= cutoff and a not in week]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Applied in the last 7 days", len(week))
+    c2.metric("Interviews", sum(1 for a in apps if a["status"] == "Interviewing"))
+    c3.metric("Other updates this week", len(updated))
+
+    chart = pd.DataFrame({"Applications": [sum(1 for a in week if a["date_applied"] == d.isoformat()) for d in days]},
+                         index=[d.strftime("%m/%d %a") for d in days])
+    st.bar_chart(chart)
+
+    if not week:
+        st.info("No applications in the last 7 days yet. Connect your email in the Email sync tab and "
+                "Manu Agent will find them for you.")
+        return
+    rows = [{"Date": a["date_applied"], "Company": a["company"], "Role": a["role"], "Interest": a["interest"],
+             "Status": a["status"], "Source": "📧 Email" if "Auto-added from email" in (a.get("notes") or "") else "Manual",
+             "Job link": a.get("job_link", "")} for a in week]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                 column_config={"Job link": st.column_config.LinkColumn("Job link")})
+
+
+def all_view(apps):
+    if not apps:
+        st.info("No applications yet. Connect email (Email sync tab), save one from Job updates, or tell "
+                "Manu Agent in Chat: \"I applied to [role] at [company]\".")
+        return
     df = pd.DataFrame(apps)
     counts = df["status"].value_counts()
     for col, (status, n) in zip(st.columns(len(counts)), counts.items()):
@@ -195,9 +273,21 @@ def applications_page():
                  column_config={"job_link": st.column_config.LinkColumn("Job link"),
                                 "ats_score": st.column_config.NumberColumn("ATS %")})
 
-    # ----- Apply helper -----
-    st.subheader("✍️ Apply helper")
+    st.subheader("Update a status")
+    labels = {f"#{a['id']} {a['role']} @ {a['company']} ({a['status']})": a["id"] for a in apps}
+    s1, s2, s3 = st.columns([3, 2, 1])
+    picked = s1.selectbox("Application", list(labels), key="status_app")
+    new_status = s2.selectbox("New status", STATUSES)
+    if s3.button("Update", use_container_width=True):
+        flash(update_application(labels[picked], status=new_status))
+        st.rerun()
+
+
+def apply_helper(apps):
     st.caption("Manu Agent prepares everything. You open the job page, paste, and click Submit yourself.")
+    if not apps:
+        st.info("Save a job first (from Job updates or Chat), then come back here.")
+        return
     order = sorted(apps, key=lambda a: a["status"] != "Saved")
     labels = {f"#{a['id']} {a['role']} @ {a['company']} ({a['status']})": a["id"] for a in order}
     app_id = labels[st.selectbox("Choose a job", list(labels))]
@@ -247,13 +337,52 @@ def applications_page():
         with st.expander("📦 Your application kit", expanded=True):
             st.markdown(app["prep"])
 
-    # ----- Manual status update -----
-    st.subheader("Update a status")
-    s1, s2, s3 = st.columns([3, 2, 1])
-    picked = s1.selectbox("Application", list(labels), key="status_app")
-    new_status = s2.selectbox("New status", STATUSES)
-    if s3.button("Update", use_container_width=True):
-        flash(update_application(labels[picked], status=new_status))
+
+def email_view():
+    data = storage.load()
+    if not email_configured():
+        st.markdown("#### Let Manu Agent track your applications automatically")
+        st.write("When you apply, companies send a confirmation email. Manu Agent reads those emails "
+                 "(read-only, it never sends or deletes anything) and adds the jobs here for you. "
+                 "It also notices rejections and interview invites and updates the status.")
+        st.markdown("**Setup (one time):**\n"
+                    "1. Open **myaccount.google.com/apppasswords** (turn on 2-Step Verification first if asked).\n"
+                    "2. Name it `Manu Agent` and click **Create**.\n"
+                    "3. Copy the 16-letter password and paste it below.")
+        with st.form("connect_email"):
+            address = st.text_input("Gmail address", placeholder="you@gmail.com")
+            password = st.text_input("App Password", type="password", placeholder="abcd efgh ijkl mnop")
+            if st.form_submit_button("Connect email", type="primary"):
+                ok, msg = connect_email(address, password)
+                if ok:
+                    flash(msg + " Click Check my email now to scan the last 7 days.")
+                    st.rerun()
+                else:
+                    st.error(msg)
+        st.caption("Your App Password is saved only in the private .env file on your Mac, never on GitHub. "
+                   "Only job-related emails are sent to the AI to read.")
+        return
+
+    import os
+    st.success(f"📧 Connected to {os.getenv('GMAIL_ADDRESS')}")
+    st.caption(f"Last checked: {data.get('last_email_sync') or 'never'}")
+    c1, c2 = st.columns(2)
+    days = c1.selectbox("Check emails from the last", [7, 14, 30], format_func=lambda d: f"{d} days")
+    if c2.button("📥 Check my email now", type="primary", use_container_width=True):
+        try:
+            with st.spinner("Reading your job emails and updating your tracker..."):
+                st.session_state.sync_summary = run_email_sync(days)
+            st.rerun()
+        except anthropic.APIError as e:
+            st.error(f"The AI service returned an error: {e}")
+
+    auto = st.toggle(f"Check automatically when Manu Agent opens (every {AUTO_SYNC_HOURS} hours)",
+                     value=data["settings"].get("auto_email_sync", True))
+    if auto != data["settings"].get("auto_email_sync", True):
+        data["settings"]["auto_email_sync"] = auto
+        storage.save(data)
+    if st.button("Disconnect email"):
+        flash(disconnect_email())
         st.rerun()
 
 

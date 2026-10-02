@@ -10,7 +10,11 @@ def _add_follow_up(data, app) -> str:
     """When you apply, automatically add a follow-up reminder (once per application)."""
     if any(r.get("app_id") == app["id"] and r["text"].startswith("Follow up") for r in data["reminders"]):
         return ""
-    due = (date.today() + timedelta(days=FOLLOW_UP_DAYS)).isoformat()
+    try:
+        applied = date.fromisoformat(app.get("date_applied") or storage.today())
+    except ValueError:
+        applied = date.today()
+    due = (applied + timedelta(days=FOLLOW_UP_DAYS)).isoformat()
     data["reminders"].append({"id": storage.new_id(data), "text": f"Follow up on {app['role']} @ {app['company']}",
                               "due_date": due, "due_time": "", "app_id": app["id"], "done": False})
     return f" Follow-up reminder set for {due}."
@@ -72,8 +76,11 @@ def update_application(app_id: int, status: str = "", notes: str = "", job_link:
     return "Updated: " + _fmt(app) + extra
 
 
-def list_applications(interest: str = "", status: str = "") -> str:
+def list_applications(interest: str = "", status: str = "", since_days: int = 0) -> str:
     apps = storage.load()["applications"]
+    if since_days:
+        cutoff = (date.today() - timedelta(days=since_days)).isoformat()
+        apps = [a for a in apps if (a.get("date_applied") or "") >= cutoff]
     if interest:
         apps = [a for a in apps if a["interest"].lower() == interest.lower()]
     if status:
@@ -136,10 +143,12 @@ TOOLS = [
     },
     {
         "name": "list_applications",
-        "description": "List applications grouped by interest. Optionally filter by interest or status.",
+        "description": ("List applications grouped by interest. Optionally filter by interest, status, or "
+                        "since_days (e.g. 7 = applied in the last week)."),
         "input_schema": {
             "type": "object",
-            "properties": {"interest": {"type": "string"}, "status": {"type": "string"}},
+            "properties": {"interest": {"type": "string"}, "status": {"type": "string"},
+                           "since_days": {"type": "integer"}},
         },
     },
     {

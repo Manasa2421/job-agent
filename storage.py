@@ -12,7 +12,8 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 
 def _default():
     return {"interests": [], "applications": [], "reminders": [], "memories": [], "wishlist": [],
-            "job_leads": [], "job_leads_updated": "", "next_id": 1}
+            "job_leads": [], "job_leads_updated": "", "processed_emails": [], "last_email_sync": "",
+            "settings": {"auto_email_sync": True}, "next_id": 1}
 
 
 def load() -> dict:

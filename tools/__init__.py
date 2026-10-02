@@ -1,8 +1,8 @@
 """Collects every tool module. To add a new feature: create tools/your_feature.py
 with TOOLS and FUNCTIONS, then add it to MODULES below."""
-from . import interests, applications, reminders, resume_ats, daily, memory
+from . import interests, applications, reminders, resume_ats, daily, memory, wishlist, jobs
 
-MODULES = [interests, applications, reminders, resume_ats, daily, memory]
+MODULES = [interests, applications, reminders, resume_ats, daily, memory, wishlist, jobs]
 
 TOOLS = []
 FUNCTIONS = {}

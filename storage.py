@@ -11,7 +11,8 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 
 
 def _default():
-    return {"interests": [], "applications": [], "reminders": [], "memories": [], "next_id": 1}
+    return {"interests": [], "applications": [], "reminders": [], "memories": [], "wishlist": [],
+            "job_leads": [], "job_leads_updated": "", "next_id": 1}
 
 
 def load() -> dict:

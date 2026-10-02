@@ -69,7 +69,7 @@ def main():
     history = storage.load_history()
     web = False
     print("\n" + daily_update() + "\n")
-    print("Agent ready! Type /help for commands.\n")
+    print("Manu Agent is ready! Type /help for commands.\n")
 
     while True:
         try:

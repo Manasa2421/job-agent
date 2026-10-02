@@ -1,4 +1,4 @@
-"""App version of your agent: a chat window in your browser.
+"""Manu Agent - your personal AI assistant app, in your browser.
 Start it by double-clicking Start-Job-Agent.command (or: streamlit run app.py)."""
 from datetime import time
 
@@ -8,20 +8,24 @@ import streamlit as st
 
 import core
 import storage
-from tools.applications import STATUSES, update_application
-from tools.daily import daily_update
+from tools.applications import STATUSES, add_application, update_application
+from tools.daily import daily_update, due_now
 from tools.memory import forget
 from tools.reminders import add_reminder, complete_reminder
 from tools.resume_ats import load_resume
+from tools.wishlist import CATEGORIES, add_wishlist_item, complete_wishlist_item, delete_wishlist_item
 
-st.set_page_config(page_title="My AI Agent", page_icon="💼", layout="wide")
+st.set_page_config(page_title="Manu Agent", page_icon="🤖", layout="wide")
 
 STARTERS = [
     "Help me check a job description against my resume",
     "Find Data Engineer jobs posted this week in Dallas",
-    "Write a cover letter for my latest saved job",
+    "Add 'learn Apache Airflow' to my wishlist and remind me next Friday",
     "Give me 5 interview questions for a Data Engineer role",
 ]
+PAGES = ["💬 Chat", "📰 Job updates", "📋 Applications", "⭐ Wishlist", "🔔 Reminders", "📅 Daily update", "🧠 Memory"]
+WEB_ERROR = ("Web search failed. It may need to be turned on for your account: in Claude Console, "
+             "check your organization's privacy or tool settings for web search. Details: ")
 
 # ---------- Setup ----------
 if "client" not in st.session_state:
@@ -33,16 +37,27 @@ if "client" not in st.session_state:
 if "history" not in st.session_state:
     st.session_state.history = storage.load_history()
 
+client = st.session_state.client
 history = st.session_state.history
+
+
+def flash(msg: str):
+    """Show a message after the page reloads."""
+    st.session_state.flash = msg
+
+
+def show_flash():
+    if "flash" in st.session_state:
+        st.success(st.session_state.pop("flash"))
+
 
 # ---------- Sidebar ----------
 with st.sidebar:
-    st.title("💼 My AI Agent")
-    page = st.radio("Go to", ["💬 Chat", "📋 Applications", "🔔 Reminders", "📅 Daily update", "🧠 Memory"],
-                    label_visibility="collapsed")
+    st.title("🤖 Manu Agent")
+    page = st.radio("Go to", PAGES, label_visibility="collapsed")
     st.divider()
-    web = st.toggle("🌐 Web search", value=False,
-                    help="Lets the agent search the internet for jobs, companies and current info.")
+    web = st.toggle("🌐 Web search in chat", value=False,
+                    help="Lets Manu Agent search the internet for jobs, companies and current info.")
 
     st.subheader("📄 Resume")
     if storage.RESUME_FILE.exists():
@@ -66,12 +81,16 @@ with st.sidebar:
 
 # ---------- Chat ----------
 def chat_page():
+    due = due_now()
+    if due:
+        st.warning("**Due today:** " + " | ".join(due))
+
     for msg in history:
-        with st.chat_message(msg["role"]):
+        with st.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else None):
             st.markdown(msg["content"])
 
     if not history:
-        st.markdown("### How can I help today?")
+        st.markdown("### Hi, I'm Manu Agent. How can I help today?")
         st.caption("Ask anything, or paste a job description. Long text pastes work here.")
         cols = st.columns(2)
         for i, text in enumerate(STARTERS):
@@ -79,23 +98,21 @@ def chat_page():
                 st.session_state.pending = text
                 st.rerun()
 
-    prompt = st.chat_input("Message your agent...") or st.session_state.pop("pending", None)
+    prompt = st.chat_input("Message Manu Agent...") or st.session_state.pop("pending", None)
     if not prompt:
         return
 
     with st.chat_message("user"):
         st.markdown(prompt)
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar="🤖"):
         activity = st.empty()
         try:
             with st.spinner("Thinking..."):
-                reply = core.run_turn(
-                    st.session_state.client, history, prompt, web=web,
-                    on_tool=lambda name: activity.caption(f"🔧 Using {name.replace('_', ' ')}..."),
-                )
+                reply = core.run_turn(client, history, prompt, web=web,
+                                      on_tool=lambda n: activity.caption(f"🔧 {n.replace('_', ' ')}..."))
         except anthropic.APIError as e:
             activity.empty()
-            st.error(f"The AI service returned an error: {e}")
+            st.error((WEB_ERROR if web else "The AI service returned an error: ") + str(e))
             return
         activity.empty()
         st.markdown(reply)
@@ -103,36 +120,186 @@ def chat_page():
     storage.save_history(history)
 
 
-# ---------- Applications ----------
+# ---------- Job updates ----------
+def jobs_page():
+    st.header("📰 Job updates")
+    show_flash()
+    data = storage.load()
+    interests = data["interests"]
+    st.caption("Looking for: " + (", ".join(interests) if interests
+                                  else "no interests yet. Tell Manu Agent your target roles in Chat."))
+    where = st.text_input("Location or preferences (optional)", placeholder="Dallas, TX or remote, entry level")
+
+    if st.button("🔎 Find new jobs for me", type="primary"):
+        roles = ", ".join(interests) or "the roles I'm targeting (use what you remember about me)"
+        prompt = (f"Search the web for job postings from the last 7 days for: {roles}."
+                  + (f" Location and preferences: {where}." if where else "")
+                  + " Use what you remember about me. Find up to 10 real, currently open postings with direct "
+                    "links. Then call save_job_leads with them. Finish with a 2-3 sentence summary.")
+        try:
+            with st.spinner("Searching the web for new jobs. This can take a minute..."):
+                st.session_state.jobs_summary = core.run_turn(client, [], prompt, web=True)
+        except anthropic.APIError as e:
+            st.error(WEB_ERROR + str(e))
+        data = storage.load()
+
+    if st.session_state.get("jobs_summary"):
+        st.info(st.session_state.jobs_summary)
+
+    leads = data["job_leads"]
+    if not leads:
+        st.write("No job leads yet. Click **Find new jobs for me** to search.")
+        return
+    st.caption(f"Last searched: {data['job_leads_updated']}")
+    tracked = {a.get("job_link") for a in data["applications"] if a.get("job_link")}
+    for i, j in enumerate(leads):
+        with st.container(border=True):
+            st.markdown(f"**{j['title']}** at {j['company']}")
+            meta = [x for x in [j.get("location"), j.get("posted") and f"posted {j['posted']}", j.get("interest")] if x]
+            if meta:
+                st.caption(" | ".join(meta))
+            if j.get("why_match"):
+                st.write(j["why_match"])
+            c1, c2 = st.columns(2)
+            if j.get("link"):
+                c1.link_button("Open job posting", j["link"])
+            if j.get("link") in tracked:
+                c2.caption("✅ In your tracker")
+            elif c2.button("Save to tracker", key=f"lead{i}"):
+                add_application(j["company"], j["title"], j.get("interest") or (interests[0] if interests else "Other"),
+                                status="Saved", job_link=j.get("link", ""), location=j.get("location", ""),
+                                notes=j.get("why_match", ""))
+                flash(f"Saved {j['title']} at {j['company']}. Open Applications to prepare it.")
+                st.rerun()
+
+
+# ---------- Applications + Apply helper ----------
 def applications_page():
     st.header("📋 Applications")
+    show_flash()
     apps = storage.load()["applications"]
     if not apps:
-        st.info("No applications yet. In Chat, say: \"I applied to [role] at [company], add it to my tracker\".")
+        st.info("No applications yet. Save one from Job updates, or tell Manu Agent in Chat: "
+                "\"I applied to [role] at [company], add it to my tracker\".")
         return
 
     df = pd.DataFrame(apps)
     counts = df["status"].value_counts()
-    cols = st.columns(len(counts))
-    for col, (status, n) in zip(cols, counts.items()):
+    for col, (status, n) in zip(st.columns(len(counts)), counts.items()):
         col.metric(status, n)
 
-    interests = ["All"] + sorted(df["interest"].unique().tolist())
-    choice = st.selectbox("Interest area", interests)
+    choice = st.selectbox("Interest area", ["All"] + sorted(df["interest"].unique().tolist()))
     view = df if choice == "All" else df[df["interest"] == choice]
-    show = ["id", "company", "role", "interest", "status", "ats_score", "date_applied", "last_updated", "job_link", "notes"]
+    show = ["id", "company", "role", "interest", "status", "ats_score", "date_applied", "job_link", "notes"]
     st.dataframe(view[[c for c in show if c in view.columns]], use_container_width=True, hide_index=True,
-                 column_config={"job_link": st.column_config.LinkColumn("job_link"),
+                 column_config={"job_link": st.column_config.LinkColumn("Job link"),
                                 "ats_score": st.column_config.NumberColumn("ATS %")})
 
+    # ----- Apply helper -----
+    st.subheader("✍️ Apply helper")
+    st.caption("Manu Agent prepares everything. You open the job page, paste, and click Submit yourself.")
+    order = sorted(apps, key=lambda a: a["status"] != "Saved")
+    labels = {f"#{a['id']} {a['role']} @ {a['company']} ({a['status']})": a["id"] for a in order}
+    app_id = labels[st.selectbox("Choose a job", list(labels))]
+    app = next(a for a in apps if a["id"] == app_id)
+
+    jd = st.text_area("Job description", value=app.get("job_description", ""), height=180,
+                      placeholder="Paste the job description here so Manu Agent can tailor your application.")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Prepare my application", type="primary", use_container_width=True):
+        if not jd.strip():
+            st.warning("Paste the job description first.")
+        else:
+            update_application(app_id, job_description=jd)
+            prompt = (f"Prepare my application for application #{app_id}: {app['role']} at {app['company']}.\n\n"
+                      f"Job description:\n{jd}\n\n"
+                      f"Please: 1) run the ATS check and store the score with app_id {app_id}; "
+                      "2) tell me exactly what to change in my resume, or say to keep it the same if it's a strong "
+                      "match (never invent experience; flag anything I must confirm); "
+                      "3) write a tailored cover letter under 300 words using only facts from my resume and memory; "
+                      "4) give short answers to: Tell us about yourself, Why this company, Why this role. "
+                      "Use clear headings.")
+            try:
+                with st.spinner("Preparing your application kit..."):
+                    kit = core.run_turn(client, [], prompt)
+                data = storage.load()
+                for a in data["applications"]:
+                    if a["id"] == app_id:
+                        a["prep"] = kit
+                storage.save(data)
+                flash("Your application kit is ready below.")
+                st.rerun()
+            except anthropic.APIError as e:
+                st.error(f"The AI service returned an error: {e}")
+
+    if app.get("job_link"):
+        c2.link_button("🔗 Open job page", app["job_link"], use_container_width=True)
+    else:
+        c2.caption("No job link saved for this job.")
+    if app["status"] != "Applied":
+        if c3.button("✅ I applied", use_container_width=True):
+            flash(update_application(app_id, status="Applied"))
+            st.rerun()
+    else:
+        c3.caption("✅ Applied")
+
+    if app.get("prep"):
+        with st.expander("📦 Your application kit", expanded=True):
+            st.markdown(app["prep"])
+
+    # ----- Manual status update -----
     st.subheader("Update a status")
-    labels = {f"#{a['id']} {a['role']} @ {a['company']}": a["id"] for a in apps}
-    c1, c2, c3 = st.columns([3, 2, 1])
-    picked = c1.selectbox("Application", list(labels))
-    new_status = c2.selectbox("New status", STATUSES)
-    if c3.button("Update", use_container_width=True):
-        st.success(update_application(labels[picked], status=new_status))
+    s1, s2, s3 = st.columns([3, 2, 1])
+    picked = s1.selectbox("Application", list(labels), key="status_app")
+    new_status = s2.selectbox("New status", STATUSES)
+    if s3.button("Update", use_container_width=True):
+        flash(update_application(labels[picked], status=new_status))
         st.rerun()
+
+
+# ---------- Wishlist ----------
+def wishlist_page():
+    st.header("⭐ Wishlist")
+    st.caption("Dream jobs, companies, skills to learn, personal goals. Add a date and Manu Agent reminds you.")
+    show_flash()
+    with st.form("new_wish", clear_on_submit=True):
+        item = st.text_input("What do you want?", placeholder="Learn Apache Airflow")
+        c1, c2 = st.columns(2)
+        category = c1.selectbox("Category", CATEGORIES)
+        remind = c2.date_input("Remind me on (optional)", value=None)
+        notes = st.text_input("Notes (optional)")
+        if st.form_submit_button("Add to wishlist") and item:
+            flash(add_wishlist_item(item, category, remind.isoformat() if remind else "", notes))
+            st.rerun()
+
+    items = storage.load()["wishlist"]
+    open_items = [w for w in items if not w["done"]]
+    if not open_items:
+        st.info("Your wishlist is empty. Add something above, or tell Manu Agent in Chat.")
+    today = storage.today()
+    for cat in CATEGORIES:
+        group = sorted([w for w in open_items if w["category"] == cat], key=lambda w: w["remind_date"] or "9999")
+        if not group:
+            continue
+        st.markdown(f"**{cat}**")
+        for w in group:
+            c1, c2, c3 = st.columns([6, 1, 1])
+            when = ""
+            if w["remind_date"]:
+                flag = "⚠️ " if w["remind_date"] < today else ("👉 " if w["remind_date"] == today else "")
+                when = f" ({flag}remind {w['remind_date']})"
+            c1.write(f"{w['item']}{when}" + (f"  \n_{w['notes']}_" if w.get("notes") else ""))
+            if c2.button("Done", key=f"wdone{w['id']}"):
+                complete_wishlist_item(w["id"])
+                st.rerun()
+            if c3.button("Remove", key=f"wdel{w['id']}"):
+                delete_wishlist_item(w["id"])
+                st.rerun()
+    done = [w for w in items if w["done"]]
+    if done:
+        with st.expander(f"Achieved ({len(done)})"):
+            for w in done:
+                st.write(f"✅ {w['item']}")
 
 
 # ---------- Reminders ----------
@@ -169,11 +336,11 @@ def daily_page():
 
 # ---------- Memory ----------
 def memory_page():
-    st.header("🧠 What your agent remembers")
-    st.caption("Your agent saves lasting facts you share (skills, goals, preferences) and uses them in every chat.")
+    st.header("🧠 What Manu Agent remembers")
+    st.caption("Manu Agent saves lasting facts you share (skills, goals, preferences) and uses them in every chat.")
     mems = storage.load()["memories"]
     if not mems:
-        st.info("Nothing yet. Try telling it in Chat: \"I'm a Data Engineer with 3 years of experience in Python and Spark.\"")
+        st.info("Nothing yet. Try telling it in Chat: \"I'm a Data Engineer with experience in Python and Spark.\"")
     for m in mems:
         c1, c2 = st.columns([6, 1])
         c1.write(m["fact"])
@@ -182,5 +349,6 @@ def memory_page():
             st.rerun()
 
 
-{"💬 Chat": chat_page, "📋 Applications": applications_page, "🔔 Reminders": reminders_page,
- "📅 Daily update": daily_page, "🧠 Memory": memory_page}[page]()
+{"💬 Chat": chat_page, "📰 Job updates": jobs_page, "📋 Applications": applications_page,
+ "⭐ Wishlist": wishlist_page, "🔔 Reminders": reminders_page, "📅 Daily update": daily_page,
+ "🧠 Memory": memory_page}[page]()

@@ -1,6 +1,6 @@
-# My AI Agent
+# 🤖 Manu Agent
 
-A personal AI assistant (Python + Claude API) with job-search superpowers.
+A personal AI assistant app (Python + Claude API + Streamlit) with job-search superpowers.
 
 ## Features
 - Chat about anything, like Claude or ChatGPT, in a browser app
@@ -8,6 +8,9 @@ A personal AI assistant (Python + Claude API) with job-search superpowers.
 - Optional web search: find real job openings and research companies
 - ATS resume check against any job description, with honest rewrite suggestions
 - Application tracker grouped by interest area
+- Wishlist (jobs, companies, skills, goals) with reminders
+- Job updates: finds new postings on the web, save them with one click
+- Apply helper: ATS check, resume changes, cover letter and answers in one click; follow-up reminders set automatically
 - Reminders and a daily update
 
 ## Setup (Mac)

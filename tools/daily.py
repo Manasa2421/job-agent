@@ -28,6 +28,15 @@ def daily_update() -> str:
     for r in upcoming:
         lines.append(f"  • {r['due_date']} #{r['id']}: {r['text']}")
 
+    wish = [w for w in data["wishlist"] if not w["done"]]
+    wish_due = sorted([w for w in wish if w["remind_date"] and w["remind_date"] <= week], key=lambda w: w["remind_date"])
+    lines += ["", "⭐ WISHLIST"]
+    for w in wish_due:
+        tag = "⚠️  OVERDUE" if w["remind_date"] < t else ("👉 TODAY" if w["remind_date"] == t else f"• {w['remind_date']}")
+        lines.append(f"  {tag} #{w['id']} [{w['category']}] {w['item']}")
+    if not wish_due:
+        lines.append(f"  No wishlist reminders this week ({len(wish)} item(s) on your wishlist).")
+
     apps = data["applications"]
     cutoff = (today - timedelta(days=FOLLOW_UP_AFTER_DAYS)).isoformat()
     follow = [a for a in apps if a["status"] == "Applied" and a["last_updated"] <= cutoff]
@@ -53,10 +62,20 @@ def daily_update() -> str:
     return "\n".join(lines)
 
 
+def due_now() -> list:
+    """Short list of things needing attention today (used for the app's banner)."""
+    data = storage.load()
+    t = date.today().isoformat()
+    items = [f"Reminder: {r['text']}" for r in data["reminders"] if not r["done"] and r["due_date"] <= t]
+    items += [f"Wishlist: {w['item']}" for w in data["wishlist"]
+              if not w["done"] and w["remind_date"] and w["remind_date"] <= t]
+    return items
+
+
 TOOLS = [
     {
         "name": "daily_update",
-        "description": "Get today's update: overdue/today/upcoming reminders, follow-ups needed, interviews, summary.",
+        "description": "Get today's update: reminders, wishlist reminders, follow-ups needed, interviews, summary.",
         "input_schema": {"type": "object", "properties": {}},
     },
 ]

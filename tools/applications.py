@@ -1,5 +1,19 @@
 """Track job applications: add, update status, list, delete."""
+from datetime import date, timedelta
+
 import storage
+
+FOLLOW_UP_DAYS = 7
+
+
+def _add_follow_up(data, app) -> str:
+    """When you apply, automatically add a follow-up reminder (once per application)."""
+    if any(r.get("app_id") == app["id"] and r["text"].startswith("Follow up") for r in data["reminders"]):
+        return ""
+    due = (date.today() + timedelta(days=FOLLOW_UP_DAYS)).isoformat()
+    data["reminders"].append({"id": storage.new_id(data), "text": f"Follow up on {app['role']} @ {app['company']}",
+                              "due_date": due, "due_time": "", "app_id": app["id"], "done": False})
+    return f" Follow-up reminder set for {due}."
 
 STATUSES = ["Saved", "Applied", "Interviewing", "Offer", "Rejected", "Withdrawn", "No Response"]
 
@@ -15,7 +29,8 @@ def _fmt(a) -> str:
 
 
 def add_application(company: str, role: str, interest: str, status: str = "Applied",
-                    job_link: str = "", location: str = "", notes: str = "", date_applied: str = "") -> str:
+                    job_link: str = "", location: str = "", notes: str = "", date_applied: str = "",
+                    job_description: str = "") -> str:
     data = storage.load()
     if interest not in data["interests"]:
         data["interests"].append(interest)
@@ -23,19 +38,26 @@ def add_application(company: str, role: str, interest: str, status: str = "Appli
         "id": storage.new_id(data), "company": company, "role": role, "interest": interest,
         "status": status, "job_link": job_link, "location": location, "notes": notes,
         "date_applied": date_applied or (storage.today() if status == "Applied" else ""),
-        "last_updated": storage.today(), "ats_score": None,
+        "last_updated": storage.today(), "ats_score": None, "job_description": job_description,
         "history": [{"date": storage.today(), "status": status}],
     }
     data["applications"].append(app)
+    extra = _add_follow_up(data, app) if status == "Applied" else ""
     storage.save(data)
-    return "Added: " + _fmt(app)
+    return "Added: " + _fmt(app) + extra
 
 
-def update_application(app_id: int, status: str = "", notes: str = "", job_link: str = "") -> str:
+def update_application(app_id: int, status: str = "", notes: str = "", job_link: str = "",
+                       job_description: str = "") -> str:
     data = storage.load()
     app = _find(data, app_id)
     if not app:
         return f"No application with id {app_id}."
+    extra = ""
+    if job_description:
+        app["job_description"] = job_description
+    if status == "Applied" and app["status"] != "Applied":
+        extra = _add_follow_up(data, app)
     if status:
         app["status"] = status
         app["history"].append({"date": storage.today(), "status": status})
@@ -47,7 +69,7 @@ def update_application(app_id: int, status: str = "", notes: str = "", job_link:
         app["job_link"] = job_link
     app["last_updated"] = storage.today()
     storage.save(data)
-    return "Updated: " + _fmt(app)
+    return "Updated: " + _fmt(app) + extra
 
 
 def list_applications(interest: str = "", status: str = "") -> str:
@@ -91,13 +113,15 @@ TOOLS = [
                 "location": {"type": "string"},
                 "notes": {"type": "string"},
                 "date_applied": {"type": "string", "description": "YYYY-MM-DD; defaults to today if status is Applied"},
+                "job_description": {"type": "string", "description": "Full JD text if the user shared it"},
             },
             "required": ["company", "role", "interest"],
         },
     },
     {
         "name": "update_application",
-        "description": "Update an application's status, add notes (appended), or set the job link.",
+        "description": ("Update an application's status, add notes (appended), set the job link or store the JD. "
+                        "Setting status to Applied automatically adds a follow-up reminder in 7 days."),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -105,6 +129,7 @@ TOOLS = [
                 "status": {"type": "string", "enum": STATUSES},
                 "notes": {"type": "string"},
                 "job_link": {"type": "string"},
+                "job_description": {"type": "string"},
             },
             "required": ["app_id"],
         },
